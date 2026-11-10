@@ -1,0 +1,59 @@
+import { Routes } from '@angular/router';
+
+import { internalGuard } from './modules/seguridad-accesos/shared/guards/internal.guard';
+import { platformGuard } from './modules/saas_suscripciones/shared/guards/platform.guard';
+import { saasGuard } from './modules/saas_suscripciones/planes_funcionalidades/guards/saas.guard';
+
+export const routes: Routes = [
+  { path: '', pathMatch: 'full', redirectTo: 'login' },
+  { path: 'saas/login', title: 'Acceso SaaS | FashionStore', loadComponent: () => import('./modules/saas_suscripciones/planes_funcionalidades/pages/login').then(m => m.SaasLoginPage) },
+  { path: 'saas', pathMatch: 'full', title: 'Resumen SaaS | FashionStore', canActivate: [platformGuard], data: { section: 'resumen' }, loadComponent: () => import('./modules/saas_suscripciones/suscripciones/pages/saas-dashboard').then(m => m.SaasDashboardPage) },
+  { path: 'saas/empresas', title: 'Empresas SaaS | FashionStore', canActivate: [platformGuard], data: { section: 'empresas' }, loadComponent: () => import('./modules/saas_suscripciones/suscripciones/pages/saas-dashboard').then(m => m.SaasDashboardPage) },
+  { path: 'saas/planes-suscripciones', title: 'Planes SaaS | FashionStore', canActivate: [platformGuard], data: { section: 'planes' }, loadComponent: () => import('./modules/saas_suscripciones/suscripciones/pages/saas-dashboard').then(m => m.SaasDashboardPage) },
+  { path: 'saas/registro', title: 'Registrar empresa | FashionStore', canActivate: [platformGuard], data: { section: 'aprovisionar' }, loadComponent: () => import('./modules/saas_suscripciones/suscripciones/pages/saas-dashboard').then(m => m.SaasDashboardPage) },
+  { path: 'saas/auditoria', title: 'Auditoría SaaS | FashionStore', canActivate: [platformGuard], data: { section: 'auditoria' }, loadComponent: () => import('./modules/saas_suscripciones/suscripciones/pages/saas-dashboard').then(m => m.SaasDashboardPage) },
+  { path: 'saas/respaldos', title: 'Respaldos SaaS | FashionStore', canActivate: [platformGuard], data: { section: 'respaldos' }, loadComponent: () => import('./modules/saas_suscripciones/suscripciones/pages/saas-dashboard').then(m => m.SaasDashboardPage) },
+  { path: 'saas/planes', title: 'Planes | FashionStore', canActivate: [saasGuard], loadComponent: () => import('./modules/saas_suscripciones/planes_funcionalidades/pages/planes').then(m => m.SaasPlanesPage) },
+  { path: 'admin/login', title: 'Acceso administrativo | FashionStore', loadComponent: () => import('./modules/seguridad-accesos/pages/admin-login/admin-login').then(m => m.AdminLoginPage) },
+  {
+    path: 'admin',
+    canActivateChild: [internalGuard],
+    title: 'Panel administrativo | FashionStore',
+    loadComponent: () => import('./modules/seguridad-accesos/shared/layout/admin-layout').then(m => m.AdminLayout),
+    children: [
+      { path: '', pathMatch: 'full', title: 'Panel administrativo | FashionStore', loadComponent: () => import('./modules/seguridad-accesos/pages/dashboard/dashboard').then(m => m.DashboardPage) },
+      { path: '', loadChildren: () => import('./modules/seguridad-accesos/cu05-usuarios-empleados/routes/cu05.routes').then(m => m.CU05_ROUTES) },
+      { path: 'roles', loadChildren: () => import('./modules/seguridad-accesos/cu06-roles-permisos/routes/cu06.routes').then(m => m.CU06_ROUTES) },
+      { path: 'clientes', loadChildren: () => import('./modules/seguridad-accesos/cu07-clientes/routes/cu07.routes').then(m => m.CU07_ROUTES) },
+      { path: 'bitacora', loadChildren: () => import('./modules/seguridad-accesos/cu08-bitacora/routes/cu08.routes').then(m => m.CU08_ROUTES) },
+      { path: 'ciudades', loadChildren: () => import('./modules/seguridad-accesos/cu09-sucursales-ciudades/routes/cu09.routes').then(m => m.CU09_CIUDADES_ROUTES) },
+      { path: 'sucursales', loadChildren: () => import('./modules/seguridad-accesos/cu09-sucursales-ciudades/routes/cu09.routes').then(m => m.CU09_SUCURSALES_ROUTES) },
+      { path: 'historial-compras', loadChildren: () => import('./modules/cliente-experiencia-compra/cu15-historial-compra/routes/cu15-admin.routes').then(m => m.CU15_ADMIN_ROUTES) },
+      { path: 'catalogo', loadChildren: () => import('./modules/inventario-productos/cu18-gestionar-catalogo/routes/cu18.routes').then(m => m.CU18_ROUTES) },
+      { path: 'proveedores', loadChildren: () => import('./modules/inventario-productos/cu19-gestionar-proveedores/routes/cu19.routes').then(m => m.CU19_ROUTES) },
+      { path: 'inventario', loadChildren: () => import('./modules/inventario-productos/cu20-gestionar-inventario/routes/cu20.routes').then(m => m.CU20_ROUTES) },
+      { path: 'promociones', loadChildren: () => import('./modules/inventario-productos/cu21-gestionar-promociones/routes/cu21.routes').then(m => m.CU21_ROUTES) },
+      { path: 'reservas-sucursal', loadChildren: () => import('./modules/Reservas y Atencion en tienda/cu22-gestionar-reservas-sucursal/routes/cu22.routes').then(m => m.CU22_ROUTES) },
+      { path: 'devoluciones', loadChildren: () => import('./modules/Reservas y Atencion en tienda/cu23-gestionar-devoluciones/routes/cu23.routes').then(m => m.CU23_ROUTES) },
+      { path: 'politicas-devolucion', loadChildren: () => import('./modules/Reservas y Atencion en tienda/cu23-gestionar-devoluciones/routes/cu23.routes').then(m => m.CU23_POLITICAS_ROUTES) },
+      { path: 'caja', loadChildren: () => import('./modules/ventas_reportes/cu24-registrar-venta/routes/cu24.routes').then(m => m.CU24_ROUTES) },
+      { path: 'reportes', loadChildren: () => import('./modules/ventas_reportes/cu25-reportes/routes/cu25.routes').then(m => m.CU25_ROUTES) },
+    ],
+  },
+  { path: '', loadChildren: () => import('./modules/seguridad-accesos/routes/seguridad-accesos.routes').then(m => m.SEGURIDAD_ACCESOS_ROUTES) },
+  {
+    path: 'tienda',
+    title: 'Tienda | FashionStore',
+    loadComponent: () => import('./modules/cliente-experiencia-compra/shared/layout/shop-layout').then(m => m.ShopLayout),
+    children: [
+      { path: '', loadChildren: () => import('./modules/cliente-experiencia-compra/cu10-consultar-prendas/routes/cu10.routes').then(m => m.CU10_ROUTES) },
+      { path: 'reservas', loadChildren: () => import('./modules/cliente-experiencia-compra/cu11-gestionar-reserva/routes/cu11.routes').then(m => m.CU11_ROUTES) },
+      { path: 'carrito', loadChildren: () => import('./modules/cliente-experiencia-compra/cu12-carrito/routes/cu12.routes').then(m => m.CU12_ROUTES) },
+      { path: 'finalizar-compra', loadChildren: () => import('./modules/cliente-experiencia-compra/cu13-compra-digital/routes/cu13.routes').then(m => m.CU13_ROUTES) },
+      { path: 'pago', loadChildren: () => import('./modules/cliente-experiencia-compra/cu14-pago-electronico/routes/cu14.routes').then(m => m.CU14_ROUTES) },
+      { path: 'historial-compras', loadChildren: () => import('./modules/cliente-experiencia-compra/cu15-historial-compra/routes/cu15.routes').then(m => m.CU15_ROUTES) },
+      { path: 'recomendaciones', loadChildren: () => import('./modules/cliente-experiencia-compra/cu17-recomendaciones/routes/cu17.routes').then(m => m.CU17_ROUTES) },
+    ],
+  },
+  { path: '**', redirectTo: 'login' },
+];

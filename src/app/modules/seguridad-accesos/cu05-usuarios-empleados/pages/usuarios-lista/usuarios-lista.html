@@ -1,0 +1,34 @@
+<app-cu05-layout title="Usuarios y empleados" [error]="error()">
+  <div class="actions"><a routerLink="/admin/empleados/nuevo">Crear empleado</a></div>
+  <form [formGroup]="form" (ngSubmit)="aplicar()">
+    <fieldset [disabled]="busy()"><legend>Filtrar usuarios internos</legend>
+      <div class="form-grid">
+        <div class="field"><label for="buscar">Nombre, apellidos, correo o CI</label><input id="buscar" formControlName="q" maxlength="100" /></div>
+        <div class="field"><label for="tipo">Tipo</label><select id="tipo" formControlName="tipo"><option value="">Todos</option><option value="A">Administrador</option><option value="E">Empleado</option></select></div>
+        <div class="field"><label for="limite">Resultados por página</label><select id="limite" formControlName="limit"><option [ngValue]="10">10</option><option [ngValue]="20">20</option><option [ngValue]="50">50</option><option [ngValue]="100">100</option></select></div>
+      </div><button type="submit" [disabled]="busy()">Aplicar filtros</button>
+    </fieldset>
+  </form>
+  @if (busy()) { <p role="status">Cargando usuarios…</p> }
+  @if (error()) { <button (click)="load()" [disabled]="busy()">Reintentar</button> }
+  @if (result(); as page) {
+    <p role="status">{{ page.total }} usuarios internos encontrados.</p>
+    @if (!page.items.length) { <p>No hay usuarios para estos filtros.</p> }
+    @else {
+      <div class="table-scroll"><table><caption class="visually-hidden">Usuarios internos</caption><thead><tr><th scope="col">Nombre</th><th scope="col">CI</th><th scope="col">Correo</th><th scope="col">Código</th><th scope="col">Tipo</th><th scope="col">Rol</th><th scope="col">Estado</th><th scope="col">Acciones</th></tr></thead><tbody>
+        @for (user of page.items; track user.idUsuario) {
+          <tr><td>{{ user.nombres }} {{ user.apellidoPat }} {{ user.apellidoMat }}</td><td>{{ user.ci }}</td><td>{{ user.correo }}</td><td>{{ user.empleado?.cod_emp ?? user.admin?.cod_adm ?? 'No registrado' }}</td><td>{{ user.tipo === 'E' ? 'Empleado' : 'Administrador' }}</td><td>{{ user.rol.descripcion }}</td>
+            <td>{{ user.estado === 'inactivo' ? 'Inactivo' : (user.estado === 'activo' ? 'Activo' : 'No aplica') }}</td>
+            <td><a [routerLink]="['/admin/usuarios', user.idUsuario]">Detalle</a>
+              @if (user.tipo === 'E') { · <a [routerLink]="['/admin/empleados', user.idUsuario, 'editar']">Editar</a> }
+              @if (user.tipo === 'E' && user.estado) { · <button type="button" (click)="cambiarEstado(user)" [disabled]="busyId() === user.idUsuario">{{ user.estado === 'inactivo' ? 'Reactivar' : 'Desactivar' }}</button> }
+            </td></tr>
+        }
+      </tbody></table></div>
+    }
+    <nav class="actions" aria-label="Paginación"><button (click)="load(page.offset - page.limit)" [disabled]="busy() || page.offset === 0">Anterior</button>
+      <span>Desde {{ page.total ? page.offset + 1 : 0 }} · máximo {{ page.limit }} por página</span>
+      <button (click)="load(page.offset + page.limit)" [disabled]="busy() || page.offset + page.limit >= page.total">Siguiente</button>
+    </nav>
+  }
+</app-cu05-layout>

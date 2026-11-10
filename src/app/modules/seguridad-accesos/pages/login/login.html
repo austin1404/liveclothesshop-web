@@ -1,0 +1,119 @@
+<app-auth-layout title="Qué bueno verte de nuevo" description="Inicia sesión como cliente y vuelve a tu espacio en FashionStore.">
+  <form [formGroup]="form" (ngSubmit)="submit()" novalidate [attr.aria-busy]="busy()">
+    <fieldset [disabled]="busy()">
+      <legend class="visually-hidden">Credenciales de inicio de sesión</legend>
+      <div
+        class="field company-selector-field"
+        (mouseenter)="hoverCompanies()"
+        (mouseleave)="leaveCompanies()"
+        (keydown.escape)="closeCompanies()">
+        <label id="empresa-label" for="empresa">Empresa</label>
+        <input
+          id="empresa"
+          class="visually-hidden"
+          type="text"
+          formControlName="empresa"
+          autocomplete="organization"
+          required
+          maxlength="30"
+          aria-label="Código de empresa"
+          tabindex="-1" />
+        <button
+          type="button"
+          class="company-trigger"
+          [class.open]="companyMenuOpen()"
+          [class.has-selection]="!!form.controls.empresa.value"
+          [attr.aria-expanded]="companyMenuOpen()"
+          aria-haspopup="listbox"
+          aria-controls="empresa-listbox"
+          aria-labelledby="empresa-label"
+          aria-describedby="empresa-error"
+          [attr.aria-invalid]="form.controls.empresa.touched && form.controls.empresa.invalid"
+          (click)="toggleCompanies()">
+          @if (selectedCompany(); as selected) {
+            <span class="company-trigger-main">
+              <span class="company-badge" aria-hidden="true">{{ selected.nombre.charAt(0).toUpperCase() }}</span>
+              <span class="company-info">
+                <strong class="company-name">{{ selected.nombre }}</strong>
+                <small class="company-code">{{ selected.codigo }}</small>
+              </span>
+            </span>
+          } @else if (form.controls.empresa.value) {
+            <span class="company-trigger-main">
+              <span class="company-badge" aria-hidden="true">{{ form.controls.empresa.value.charAt(0).toUpperCase() }}</span>
+              <span class="company-info">
+                <strong class="company-name">{{ form.controls.empresa.value }}</strong>
+                <small class="company-code">Empresa seleccionada</small>
+              </span>
+            </span>
+          } @else {
+            <span class="company-placeholder">Selecciona o pasa el cursor para elegir tu tienda</span>
+          }
+          <span class="company-chevron" aria-hidden="true">▾</span>
+        </button>
+
+        <div
+          id="empresa-listbox"
+          class="company-dropdown"
+          [class.expanded]="companyMenuOpen()"
+          role="listbox"
+          aria-labelledby="empresa-label"
+          [attr.aria-hidden]="!companyMenuOpen()">
+          <div class="company-dropdown-inner">
+            @if (loadingCompanies()) {
+              <p class="company-status" role="status">Cargando tiendas disponibles…</p>
+            } @else if (companiesError()) {
+              <p class="company-status" role="alert">{{ companiesError() }}</p>
+              <button type="button" class="company-option company-retry" (click)="loadCompanies()">Reintentar</button>
+            } @else {
+              @for (company of companies(); track company.codigo) {
+                <button
+                  type="button"
+                  role="option"
+                  class="company-option"
+                  [class.selected]="form.controls.empresa.value === company.codigo"
+                  [attr.aria-selected]="form.controls.empresa.value === company.codigo"
+                  (click)="selectCompany(company)">
+                  <span class="company-badge" aria-hidden="true">{{ company.nombre.charAt(0).toUpperCase() }}</span>
+                  <span class="company-info">
+                    <strong class="company-name">{{ company.nombre }}</strong>
+                    <small class="company-code">{{ company.codigo }}</small>
+                  </span>
+                  @if (form.controls.empresa.value === company.codigo) {
+                    <span class="company-check" aria-hidden="true">✓</span>
+                  }
+                </button>
+              } @empty {
+                <p class="company-status">No hay empresas activas disponibles.</p>
+              }
+            }
+          </div>
+        </div>
+        <app-field-error [control]="form.controls.empresa" errorId="empresa-error" />
+      </div>
+      <div class="field">
+        <label for="correo">Correo electrónico</label>
+        <input id="correo" type="email" formControlName="correo" autocomplete="username" required maxlength="100"
+          placeholder="tu@correo.com" aria-describedby="correo-error"
+          [attr.aria-invalid]="form.controls.correo.touched && form.controls.correo.invalid" />
+        <app-field-error [control]="form.controls.correo" errorId="correo-error" />
+      </div>
+      <div class="field">
+        <label for="contrasena">Contraseña</label>
+        <input id="contrasena" type="password" formControlName="contrasena" autocomplete="current-password"
+          required maxlength="128" aria-describedby="contrasena-error"
+          [attr.aria-invalid]="form.controls.contrasena.touched && form.controls.contrasena.invalid" />
+        <app-field-error [control]="form.controls.contrasena" errorId="contrasena-error" />
+      </div>
+      @if (error()) { <p class="notice error" role="alert">{{ error() }}</p> }
+      <button class="button primary" type="submit" [disabled]="busy()">
+        {{ busy() ? 'Iniciando sesión…' : 'Iniciar sesión' }} <span aria-hidden="true">→</span>
+      </button>
+    </fieldset>
+  </form>
+  <p class="form-footer"><a routerLink="/olvide-contrasena">¿Olvidaste tu contraseña?</a></p>
+  <p class="form-footer">¿Es tu primera visita? <a routerLink="/registro">Crea tu cuenta</a></p>
+  <p class="privacy-note">Tu acceso es personal. Nunca te pediremos compartir tu contraseña.</p>
+  <p class="form-footer"><a routerLink="/admin/login">Acceso para administradores y empleados</a></p>
+  <p class="form-footer"><a routerLink="/saas/login">Administración de plataforma</a></p>
+</app-auth-layout>

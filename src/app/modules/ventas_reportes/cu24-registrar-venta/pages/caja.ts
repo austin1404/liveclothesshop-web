@@ -1,0 +1,448 @@
+import { Component, DestroyRef, inject, signal } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { CurrencyPipe } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { ActivatedRoute, Router } from '@angular/router';
+import { finalize } from 'rxjs';
+import { InventarioPanel, requestError } from '../../../inventario-productos/shared/panel';
+import { ReciboTicket } from '../components/recibo-ticket';
+import { OperacionesService } from '../../../inventario-productos/shared/operaciones.service';
+import { Customer, Pago, Refs, Reservation, Sale } from '../../../inventario-productos/shared/operaciones.models';
+import { ProductoDetalle, ProductosListado, VarianteDetalle } from '../../../cliente-experiencia-compra/cu10-consultar-prendas/models/catalogo.models';
+import { PwaSyncService } from '../../../../core/offline/pwa-sync.service';
+
+type ElectronicMethod = 'tarjeta' | 'QR' | 'transferencia';
+// `reservada`/`cantidadReservada` marcan las prendas que llegan de una reserva de CU22:
+// no se pueden quitar ni bajar de la cantidad reservada mientras siga vinculada.
+interface DraftLine { idVar: string; producto: string; talla: string; colores: string; imagen: string | null; cantidad: number; precio: number;
+  reservada?: boolean; cantidadReservada?: number }
+// CU24: alta de cliente en el mostrador (no cambia la sesión del cajero).
+interface NewCustomerDraft { ci: string; nombres: string; apellidoPat: string; apellidoMat: string; sexo: 'M' | 'F';
+  correo: string; telefono: string; direccion: string; fechaNac: string; contrasena: string }
+
+@Component({ selector: 'app-punto-de-venta', imports: [FormsModule, CurrencyPipe, InventarioPanel, ReciboTicket],
+  templateUrl: './caja.html', styleUrls: ['../../../inventario-productos/shared/panel.css', '../../../inventario-productos/shared/operaciones.css'] })
+export class PuntoDeVentaPage {
+  private readonly service = inject(OperacionesService);
+  private readonly destroy = inject(DestroyRef);
+  private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
+  readonly offlineSync = inject(PwaSyncService);
+  readonly refs = signal<Refs | null>(null);
+  readonly customers = signal<Customer[]>([]);
+  readonly selectedCustomer = signal<Customer | null>(null);
+  readonly reservaCliente = signal<string | null>(null);
+  readonly reservation = signal<Reservation | null>(null);
+  readonly productRows = signal<ProductosListado | null>(null);
+  readonly product = signal<ProductoDetalle | null>(null);
+  readonly sale = signal<Sale | null>(null);
+  readonly busy = signal(false);
+  readonly saving = signal(false);
+  readonly picker = signal(true);
+  readonly registrando = signal(false);
+  readonly error = signal('');
+  readonly success = signal('');
+  nroSuc = 0;
+  nroReserva: number | null = null;
+  customerQ = '';
+  productQ = '';
+  received = 0;
+  metodo: ElectronicMethod = 'tarjeta';
+  confirmCancel = false;
+  operationKey = this.newKey();
+  /** CU24: venta ya preparada de la reserva cargada; se retoma en vez de bloquear el cobro. */
+  private ventaEnCurso: number | null = null;
+  offlineQueuedId: string | null = null;
+  draft: DraftLine[] = [];
+  nuevo: NewCustomerDraft = { ci: '', nombres: '', apellidoPat: '', apellidoMat: '', sexo: 'F',
+    correo: '', telefono: '', direccion: '', fechaNac: '', contrasena: '' };
+
+  constructor() { this.loadReferences(); this.readReservation(); this.readPaymentReturn(); }
+
+  private newKey(): string {
+    return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  loadReferences(): void {
+    this.service.get<Refs>('caja/referencias').pipe(takeUntilDestroyed(this.destroy)).subscribe({
+      next: refs => {
+        this.refs.set(refs);
+        if (typeof refs?.sucursalAsignada === 'number') this.nroSuc = refs.sucursalAsignada;
+        if (Array.isArray(refs?.sucursales) && !this.productRows()) this.searchProducts();
+      },
+      error: e => this.error.set(requestError(e, this.router)),
+    });
+  }
+
+  toggleCatalog(): void {
+    const next = !this.picker();
+    this.picker.set(next);
+    if (next) this.searchProducts();
+  }
+
+  /**
+   * Reserva confirmada en CU22 que se cobra aquí. Sólo se toma `nroReserva` (y los
+   * datos auxiliares de la URL) y la venta se reconstruye consultando la reserva real:
+   * el pago la marcará como atendida y el estado temporal del navegador no manda.
+   */
+  private readReservation(): void {
+    const params = this.route.snapshot.queryParamMap;
+    const nro = Number(params.get('reserva') ?? '');
+    if (!Number.isInteger(nro) || nro < 1) return;
+    this.nroReserva = nro;
+    const sucursal = Number(params.get('sucursal') ?? '');
+    if (sucursal) this.nroSuc = sucursal;
+    const cliente = params.get('cliente');
+    if (cliente) this.reservaCliente.set(cliente);
+    this.loadReservation(nro);
+  }
+
+  /** Carga la reserva escrita a mano en la caja (mismo camino que llega desde CU22). */
+  cargarReserva(): void {
+    const nro = Number(this.nroReserva);
+    if (!Number.isInteger(nro) || nro < 1) { this.error.set('Indica un número de reserva válido.'); return; }
+    this.loadReservation(nro);
+  }
+
+  /** Consulta la reserva y prepara la venta con sus prendas, cantidades, sucursal y titular. */
+  loadReservation(nro = this.nroReserva): void {
+    if (!nro || this.busy()) return;
+    this.busy.set(true); this.error.set(''); this.success.set('');
+    this.service.get<Reservation>(`caja/reservas/${nro}`)
+      .pipe(takeUntilDestroyed(this.destroy), finalize(() => this.busy.set(false))).subscribe({
+        next: value => this.aplicarReserva(value),
+        error: e => {
+          // Una reserva inválida no prepara la venta ni se convierte en venta manual.
+          this.reservation.set(null); this.nroReserva = null; this.reservaCliente.set(null);
+          this.draft = this.draft.filter(line => !line.reservada);
+          this.error.set(requestError(e, this.router));
+        },
+      });
+  }
+
+  private aplicarReserva(value: Reservation): void {
+    this.reservation.set(value);
+    this.nroReserva = value.nroReserva;
+    this.nroSuc = value.sucursal.nro;
+    // Las prendas reservadas se cargan solas; las extra que ya hubiera se respetan.
+    this.draft = [...this.draft.filter(line => !line.reservada), ...value.items.map(item => ({
+      idVar: item.idVar, producto: item.producto, talla: item.talla ?? 'no registrada',
+      colores: (item.colores ?? []).join(', ') || 'Sin color', imagen: item.imagen ?? null,
+      cantidad: item.cantidad, precio: 0, reservada: true, cantidadReservada: item.cantidad }))];
+    if (value.idCliente) { this.reservaCliente.set(value.idCliente); this.loadReservationCustomer(value.idCliente); }
+    // CU24: si la caja ya preparó la venta de esta reserva, se retoma esa misma venta.
+    this.ventaEnCurso = value.nroVentaEnCurso ?? null;
+    this.success.set(`Reserva #${value.nroReserva} cargada: ${value.totalUnidades} unidades reservadas listas para cobrar.`);
+    if (this.ventaEnCurso) this.retomarVentaEnCurso();
+  }
+
+  private loadReservationCustomer(idCliente: string): void {
+    this.service.get<Customer[]>('caja/clientes', { idUsuario: idCliente })
+      .pipe(takeUntilDestroyed(this.destroy)).subscribe({
+        next: rows => { this.customers.set(rows); this.selectedCustomer.set(rows.length ? rows[0] : null); },
+        error: e => this.error.set(requestError(e, this.router)),
+      });
+  }
+
+  /** Quitar reserva: la venta vuelve a ser manual y sus prendas dejan de estar protegidas. */
+  clearReservation(): void {
+    if (this.saving()) return;
+    this.ventaEnCurso = null;
+    this.nroReserva = null; this.reservaCliente.set(null); this.reservation.set(null);
+    this.draft = this.draft.filter(line => !line.reservada);
+    this.success.set('Reserva quitada: la venta continúa como venta manual.');
+    if (this.route.snapshot.queryParamMap.get('reserva')) {
+      // La reserva deja de viajar en la URL: recargar la pantalla no la vuelve a precargar.
+      void this.router.navigate(['/admin/caja']).catch(() => false);
+    }
+  }
+
+  /** CU24: registra al cliente en el mostrador y lo selecciona, sin cambiar la sesión. */
+  registrarCliente(): void {
+    if (this.saving()) return;
+    const data = this.nuevo;
+    if (!data.ci.trim() || !data.nombres.trim() || !data.apellidoPat.trim() || !data.apellidoMat.trim()
+        || !data.correo.trim() || !data.telefono.trim() || !data.direccion.trim() || !data.fechaNac
+        || data.contrasena.length < 12) {
+      this.error.set('Completa los datos del cliente (la contraseña debe tener al menos 12 caracteres).'); return;
+    }
+    this.saving.set(true); this.error.set(''); this.success.set('');
+    this.service.send<Customer>('caja/clientes', {
+      ci: data.ci.trim(), nombres: data.nombres.trim(), apellidoPat: data.apellidoPat.trim(),
+      apellidoMat: data.apellidoMat.trim(), sexo: data.sexo, correo: data.correo.trim().toLowerCase(),
+      telefono: data.telefono.trim(), direccion: data.direccion.trim(),
+      fechaNac: data.fechaNac, contrasena: data.contrasena })
+      .pipe(takeUntilDestroyed(this.destroy), finalize(() => this.saving.set(false))).subscribe({
+        next: value => {
+          this.customers.set([value]);
+          this.selectedCustomer.set(value);
+          this.nuevo = { ci: '', nombres: '', apellidoPat: '', apellidoMat: '', sexo: 'F',
+            correo: '', telefono: '', direccion: '', fechaNac: '', contrasena: '' };
+          this.registrando.set(false);
+          this.success.set('Cliente registrado y seleccionado para esta venta.');
+        },
+        error: e => this.error.set(requestError(e, this.router)),
+      });
+  }
+
+  /** CU24: venta anónima; no se inventa un cliente genérico ni se libera una reserva. */
+  usarSinRegistro(): void {
+    if (this.reservation()) {
+      // La reserva siempre se cobra a su titular: primero hay que quitarla.
+      this.error.set('La reserva requiere su cliente titular; pulsa "Quitar reserva" para vender sin registro.'); return;
+    }
+    this.selectedCustomer.set(null); this.customers.set([]); this.customerQ = '';
+    this.error.set(''); this.success.set('Venta sin registro: se guardará como venta anónima (sin cliente).');
+  }
+
+  searchCustomers(): void {
+    this.service.get<Customer[]>('caja/clientes', { q: this.customerQ.trim() })
+      .pipe(takeUntilDestroyed(this.destroy)).subscribe({
+        next: rows => this.customers.set(rows),
+        error: e => { this.customers.set([]); this.error.set(requestError(e, this.router)); },
+      });
+  }
+
+  searchProducts(offset = 0): void {
+    this.service.get<ProductosListado>('caja/productos', { q: this.productQ.trim(), offset, limit: 12 })
+      .pipe(takeUntilDestroyed(this.destroy)).subscribe({
+        next: rows => this.productRows.set(rows),
+        error: e => { this.productRows.set(null); this.error.set(requestError(e, this.router)); },
+      });
+  }
+
+  selectProduct(idProd: string): void {
+    this.service.get<ProductoDetalle>(`caja/productos/${encodeURIComponent(idProd)}`)
+      .pipe(takeUntilDestroyed(this.destroy)).subscribe({
+        next: value => this.product.set(value),
+        error: e => this.error.set(requestError(e, this.router)),
+      });
+  }
+
+  addVariant(variant: VarianteDetalle): void {
+    const product = this.product();
+    if (!product) return;
+    const existing = this.draft.find(line => line.idVar === variant.idVariante);
+    if (existing) existing.cantidad++;
+    else this.draft.push({ idVar: variant.idVariante, producto: product.descripcion,
+      talla: variant.talla.descripcion, colores: variant.colores.map(c => c.descripcion).join(', ') || 'Sin color',
+      imagen: variant.imagen, cantidad: 1, precio: Number(variant.precio) });
+    this.success.set('Prenda añadida a la venta.');
+  }
+
+  /** Las prendas de la reserva no se quitan a mano: primero hay que quitar la reserva. */
+  removeDraft(index: number): void {
+    const line = this.draft[index];
+    if (!line) return;
+    if (line.reservada) {
+      this.error.set('Esa prenda viene de la reserva; pulsa "Quitar reserva" para modificar la venta.'); return;
+    }
+    this.draft.splice(index, 1);
+  }
+
+  /** La cantidad de una prenda reservada nunca baja de lo reservado (puede subir para extras). */
+  normalizarCantidad(index: number): void {
+    const line = this.draft[index];
+    if (!line) return;
+    const minimo = line.cantidadReservada ?? 1;
+    const valor = Math.floor(Number(line.cantidad));
+    line.cantidad = !Number.isFinite(valor) || valor < minimo ? minimo : valor;
+  }
+
+  prepareSale(): void {
+    if (this.saving() || this.offlineQueuedId) return;
+    if (!this.nroSuc || !this.draft.length || this.draft.some(line => !Number.isInteger(line.cantidad) || line.cantidad < 1)) {
+      this.error.set('Selecciona sucursal y prendas con cantidades válidas.'); return;
+    }
+    if (this.nroReserva && !this.selectedCustomer()) {
+      // CU24: una venta de reserva siempre exige el cliente titular.
+      this.error.set('La reserva requiere su cliente registrado.'); return;
+    }
+    this.saving.set(true); this.error.set(''); this.success.set('');
+    this.service.send<Sale>('caja', { claveOperacion: this.operationKey, nroSuc: this.nroSuc,
+      idCliente: this.selectedCustomer()?.idUsuario ?? null, nroReserva: this.nroReserva || null,
+      items: this.draft.map(line => ({ idVar: line.idVar, cantidad: line.cantidad })) })
+      .pipe(takeUntilDestroyed(this.destroy), finalize(() => this.saving.set(false))).subscribe({
+        next: value => { this.sale.set(value); this.picker.set(false);
+          // El efectivo recibido arranca en el total: el cajero sólo ajusta el cambio.
+          if (!this.received) this.received = Number(value.total);
+          this.success.set('Venta preparada. El inventario se descuenta al confirmar el pago.'); },
+        error: e => this.error.set(requestError(e, this.router)),
+      });
+  }
+
+  /**
+   * Encola únicamente ventas nuevas de contado con precio capturado previamente
+   * online. El servidor vuelve a validar vigencia del precio, stock y descuentos;
+   * esta acción nunca afirma que inventario o pago ya fueron confirmados.
+   */
+  async enqueueOfflineCashSale(): Promise<void> {
+    if (this.saving() || this.offlineQueuedId) return;
+    if (this.nroReserva || this.draft.some(line => line.reservada)) {
+      this.error.set('Una reserva solo puede convertirse en venta cuando el servidor la valide.'); return;
+    }
+    if (!this.nroSuc || !this.draft.length || this.draft.some(line => !Number.isInteger(line.cantidad)
+        || line.cantidad < 1 || !Number.isFinite(line.precio) || line.precio <= 0)) {
+      this.error.set('Selecciona sucursal y prendas con precios capturados y cantidades válidas.'); return;
+    }
+    const subtotalCapturado = this.draft.reduce((sum, line) => sum + line.precio * line.cantidad, 0);
+    if (!Number.isFinite(Number(this.received)) || Number(this.received) < subtotalCapturado) {
+      this.error.set('Registra el efectivo recibido antes de guardar la venta pendiente.'); return;
+    }
+    this.saving.set(true); this.error.set(''); this.success.set('');
+    try {
+      this.offlineQueuedId = await this.offlineSync.enqueue({
+        tipo: 'venta', sucursal: this.nroSuc, dependeDe: [],
+        datos: {
+          lineas: this.draft.map(line => ({ idVariante: line.idVar, cantidad: line.cantidad, precio: line.precio })),
+          metodo: 'efectivo', idCliente: this.selectedCustomer()?.idUsuario ?? null,
+        },
+      });
+      this.success.set('Venta de contado guardada como pendiente. El servidor aún debe conciliar precio, descuentos y stock; no se confirma inventario ni pago hasta esa aceptación.');
+    } catch {
+      this.error.set('No se pudo persistir la venta offline. No se confirmó el pago ni se modificó el inventario.');
+    } finally { this.saving.set(false); }
+  }
+
+  offlineSales() { return this.offlineSync.operations().filter(operation => operation.tipo === 'venta'); }
+
+  offlineSaleState(id: string): string {
+    const operation = this.offlineSync.operations().find(item => item.id === id);
+    return operation ? `${operation.estado}${operation.codigo ? ` · ${operation.codigo}` : ''}${operation.detalle ? ` · ${operation.detalle}` : ''}` : 'Estado sincronizado no cargado';
+  }
+
+  cash(): void {
+    const row = this.sale();
+    if (this.saving() || !row) return;
+    if (!(Number(this.received) >= 0)) { this.error.set('Indica el efectivo recibido.'); return; }
+    this.saving.set(true); this.error.set(''); this.success.set('');
+    this.service.send<Sale>(`caja/${row.nroVenta}/efectivo`, { recibido: Number(this.received) })
+      .pipe(takeUntilDestroyed(this.destroy), finalize(() => this.saving.set(false))).subscribe({
+        next: value => { this.sale.set(value); this.success.set('Pago en efectivo confirmado.'); },
+        error: e => this.error.set(requestError(e, this.router)),
+      });
+  }
+
+  /**
+   * Inicia el cobro con Stripe Checkout. El backend crea (o reutiliza) la sesión
+   * y devuelve `checkoutUrl`; la redirección es externa, no de Angular Router.
+   * Los datos de tarjeta se introducen siempre en Stripe, nunca aquí.
+   */
+  electronic(): void {
+    const row = this.sale();
+    if (this.saving() || !row) return;
+    this.saving.set(true); this.error.set(''); this.success.set('Preparando pago seguro…');
+    this.service.send<Pago>(`caja/${row.nroVenta}/electronico`, { metodo: this.metodo })
+      .pipe(takeUntilDestroyed(this.destroy), finalize(() => this.saving.set(false))).subscribe({
+        next: value => {
+          if (value.estado === 'aprobado') {
+            // Ya cobrado: se actualiza el comprobante y no se vuelve a abrir Stripe.
+            this.success.set(''); this.loadSale(row.nroVenta); return;
+          }
+          if (!value.checkoutUrl) {
+            // Sin URL no se puede continuar y no se finge un resultado correcto.
+            this.success.set('');
+            this.error.set(value.estado === 'pendiente'
+              ? 'No se recibió una URL de Stripe para continuar el pago.'
+              : 'La pasarela no devolvió una URL de pago; consulta el estado del pago.');
+            return;
+          }
+          window.location.assign(value.checkoutUrl);
+        },
+        error: e => { this.success.set(''); this.error.set(requestError(e, this.router)); },
+      });
+  }
+
+  /** Regreso desde Stripe (success_url/cancel_url): recarga y verifica el pago real. */
+  private readPaymentReturn(): void {
+    const params = this.route.snapshot.queryParamMap;
+    const nro = Number(params.get('venta') ?? '');
+    if (!Number.isInteger(nro) || nro < 1) return;
+    this.loadSale(nro, params.get('cancelar') !== null);
+  }
+
+  /** Carga el comprobante de la venta y reconcilia su estado con el backend. */
+  loadSale(nroVenta: number, cancelado = false): void {
+    if (this.busy()) return;
+    this.busy.set(true); this.error.set('');
+    this.service.get<Sale>(`caja/${nroVenta}`)
+      .pipe(takeUntilDestroyed(this.destroy), finalize(() => this.busy.set(false))).subscribe({
+        next: value => {
+          this.sale.set(value);
+          // Al reabrir el comprobante (o volver de Stripe) el efectivo parte del total.
+          if (!this.received) this.received = Number(value.total);
+          // El frontend no es fuente de verdad: se consulta el estado real.
+          this.service.send<Sale>(`caja/${nroVenta}/consultar-pago`)
+            .pipe(takeUntilDestroyed(this.destroy)).subscribe({
+              next: updated => { this.sale.set(updated); this.success.set(this.estadoMensaje(updated, cancelado)); },
+              error: e => this.error.set(requestError(e, this.router)),
+            });
+        },
+        error: e => this.error.set(requestError(e, this.router)),
+      });
+  }
+
+  private estadoMensaje(row: Sale, cancelado: boolean): string {
+    if (row.pagos?.some(pago => pago.estado === 'aprobado')) {
+      return 'Pago confirmado por la pasarela: el comprobante quedó registrado y el inventario actualizado.';
+    }
+    if (cancelado) {
+      return 'Cancelaste el pago en Stripe: el pago no está aprobado. Puedes reintentarlo o consultar el estado.';
+    }
+    return 'Pago pendiente de confirmación de la pasarela. Usa «Consultar estado del pago» para verificarlo.';
+  }
+
+  /**
+   * CU24: si la caja ya preparó la venta de esta reserva, se abre ese comprobante para
+   * continuar el cobro. Una venta preparada y sin pagar no significa reserva vendida.
+   */
+  private retomarVentaEnCurso(): void {
+    const nro = this.ventaEnCurso;
+    this.ventaEnCurso = null;
+    if (!nro) return;
+    // La lectura de la reserva ya terminó: se libera el bloqueo y se abre la venta real.
+    this.busy.set(false);
+    this.success.set(`Se retomó la venta #${nro} preparada para esta reserva: continúa el cobro.`);
+    this.loadSale(nro);
+  }
+
+  refreshSale(): void {
+    const row = this.sale();
+    if (this.saving() || !row) return;
+    this.saving.set(true); this.error.set('');
+    this.service.send<Sale>(`caja/${row.nroVenta}/consultar-pago`)
+      .pipe(takeUntilDestroyed(this.destroy), finalize(() => this.saving.set(false))).subscribe({
+        next: value => { this.sale.set(value); this.success.set('Estado de pago actualizado.'); },
+        error: e => this.error.set(requestError(e, this.router)),
+      });
+  }
+
+  cancelSale(): void {
+    const row = this.sale();
+    if (this.saving() || !row) return;
+    this.saving.set(true); this.error.set(''); this.success.set('');
+    this.service.send<Sale>(`caja/${row.nroVenta}/cancelar`)
+      .pipe(takeUntilDestroyed(this.destroy), finalize(() => this.saving.set(false))).subscribe({
+        next: () => { this.sale.set(null); this.draft = []; this.selectedCustomer.set(null); this.confirmCancel = false;
+          this.operationKey = this.newKey(); this.success.set('Venta cancelada sin descontar existencias.'); },
+        error: e => this.error.set(requestError(e, this.router)),
+      });
+  }
+
+  newSale(): void {
+    this.sale.set(null); this.draft = []; this.selectedCustomer.set(null); this.customers.set([]);
+    this.offlineQueuedId = null; this.picker.set(true);
+    this.product.set(null); this.received = 0; this.nroReserva = null; this.confirmCancel = false;
+    this.reservaCliente.set(null); this.reservation.set(null);
+    this.ventaEnCurso = null;
+    this.operationKey = this.newKey(); this.success.set(''); this.error.set('');
+    if (this.route.snapshot.queryParamMap.get('venta')) {
+      // Fuera los parámetros del regreso de Stripe: recargar no reabre el comprobante anterior.
+      void this.router.navigate(['/admin/caja']).catch(() => false);
+    }
+  }
+
+  paid(): boolean { return this.sale()?.pagos?.some(payment => payment.estado === 'aprobado') === true; }
+  print(): void { window.print(); }
+}
